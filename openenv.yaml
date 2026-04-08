@@ -26,26 +26,51 @@ tasks:
     name: "Noisy Alert Triage"
     difficulty: easy
     description: "Single service failure with misleading alerts from healthy services"
+    grader:
+      type: rule
+      checks:
+        - diagnosed_correctly
+        - incident_resolved
 
   - id: bad_deploy
     name: "Bad Deploy Rollback"
     difficulty: medium
     description: "Recent deployment introduced a database query regression"
+    grader:
+      type: rule
+      checks:
+        - diagnosed_correctly
+        - incident_resolved
 
   - id: cascade_failure
     name: "Cascading Failure Investigation"
     difficulty: hard
     description: "Multi-service cascade from upstream infrastructure failure"
+    grader:
+      type: rule
+      checks:
+        - diagnosed_correctly
+        - incident_resolved
 
   - id: cost_vs_performance
     name: "Cost vs Performance Optimization"
     difficulty: hard
     description: "Buggy feature flag + overprovisioned infrastructure"
+    grader:
+      type: rule
+      checks:
+        - diagnosed_correctly
+        - incident_resolved
 
   - id: fog_of_war
     name: "Fog of War — Multi-Alert Chaos"
     difficulty: expert
     description: "Multiple alerts (real and fake) across 10 services"
+    grader:
+      type: rule
+      checks:
+        - diagnosed_correctly
+        - incident_resolved
 
 actions:
   - query_logs
