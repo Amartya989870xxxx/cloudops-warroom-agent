@@ -1,3 +1,12 @@
+---
+title: CloudOps Warroom Env
+emoji: 🤖
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+---
+
 # 🛡️ CloudOps WarRoom Agent - High-Efficiency Autonomous SRE System
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
