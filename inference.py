@@ -85,6 +85,52 @@ async def observation():
     return obs.model_dump()
 
 
+# ─── NEW ENDPOINTS ─── 
+
+@app.get("/tasks")
+async def list_tasks():
+    return {
+        "tasks": [
+            {"id": "noisy_alert", "name": "Noisy Alert Triage", "difficulty": "easy", "description": "Single service failure with misleading alerts from healthy services", "grader": {"type": "rule", "checks": ["diagnosed_correctly", "incident_resolved"]}},
+            {"id": "bad_deploy", "name": "Bad Deploy Rollback", "difficulty": "medium", "description": "Recent deployment introduced a database query regression", "grader": {"type": "rule", "checks": ["diagnosed_correctly", "incident_resolved"]}},
+            {"id": "cascade_failure", "name": "Cascading Failure Investigation", "difficulty": "hard", "description": "Multi-service cascade from upstream infrastructure failure", "grader": {"type": "rule", "checks": ["diagnosed_correctly", "incident_resolved"]}},
+            {"id": "cost_vs_performance", "name": "Cost vs Performance Optimization", "difficulty": "hard", "description": "Buggy feature flag + overprovisioned infrastructure", "grader": {"type": "rule", "checks": ["diagnosed_correctly", "incident_resolved"]}},
+            {"id": "fog_of_war", "name": "Fog of War — Multi-Alert Chaos", "difficulty": "expert", "description": "Multiple alerts (real and fake) across 10 services", "grader": {"type": "rule", "checks": ["diagnosed_correctly", "incident_resolved"]}},
+        ]
+    }
+
+
+@app.get("/state")
+async def state():
+    env = _get_env()
+    try:
+        obs = env.get_observation()
+        return {"observation": obs.model_dump(), "done": False}
+    except Exception:
+        return {"observation": None, "done": True}
+
+
+@app.post("/grader")
+async def grader(body: dict = {}):
+    env = _get_env()
+    try:
+        info = getattr(env, '_last_info', {}) or {}
+        incident_resolved = info.get("incident_resolved", False)
+        diagnosed_correctly = info.get("diagnosed_correctly", False)
+        if incident_resolved and diagnosed_correctly:
+            score = 1.0
+        elif diagnosed_correctly:
+            score = 0.5
+        elif incident_resolved:
+            score = 0.3
+        else:
+            score = 0.0
+        return {"normalized_score": score, "incident_resolved": incident_resolved, "diagnosed_correctly": diagnosed_correctly, "checks": {"diagnosed_correctly": diagnosed_correctly, "incident_resolved": incident_resolved}}
+    except Exception:
+        return {"normalized_score": 0.0, "incident_resolved": False, "diagnosed_correctly": False, "checks": {"diagnosed_correctly": False, "incident_resolved": False}}
+
+
+
 # ─── Action definitions ───
 
 ALL_ACTION_TYPES = [
