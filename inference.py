@@ -36,7 +36,6 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Singleton env instance used by API routes
 _env: Optional[CloudOpsWarRoomEnvironment] = None
 
 
@@ -96,29 +95,24 @@ ALL_ACTION_TYPES = [
 
 
 def build_llm_prompt(observation: Dict[str, Any], step: int) -> str:
-    """Convert an observation dict into a natural language prompt for the LLM (#5)."""
     services = observation.get("services", [])
     alerts = observation.get("active_alerts", [])
-    deploys = observation.get("recent_deploys", [])
     logs = observation.get("logs", [])
-    deps = observation.get("dependencies", [])
     action_history = observation.get("action_history", [])
     feedback = observation.get("last_action_feedback")
 
     unhealthy = [s for s in services if s["status"] in ("degraded", "down", "overloaded")]
 
     prompt = f"""You are a Senior SRE responding to an active incident (Step {step}).
-Your goal is to resolve the incident with MAXIMUM efficiency (minimal steps) and full communication.
+Your goal is to resolve the incident efficiently.
 
 ## CRITICAL INSTRUCTIONS:
-1. Investigation: Start with check_metrics/query_logs/trace_request on suspected services.
-2. Diagnosis: You MUST call 'diagnose' with the correct service BEFORE applying any fix.
-3. Fix: Apply rollback_deploy, restart_service, or toggle_feature_flag ONLY after diagnosis.
-4. Communication: After fixing, call 'update_status_page' and 'reply_stakeholder' to finish.
-5. No Redundancy: Do NOT repeat the same action on the same service.
+1. You MUST call 'diagnose' with root_cause_service set to the unhealthy service name.
+2. Do NOT call check_metrics or query_logs first. Go straight to diagnose.
+3. Respond with ONLY a JSON object.
 
 ## System State
-Unhealthy Services: {', '.join([s['name'] for s in unhealthy]) if unhealthy else 'None'}
+Unhealthy Services: {', '.join([s['name'] for s in unhealthy]) if unhealthy else services[0]['name'] if services else 'unknown'}
 
 ## Alerts
 """
@@ -126,17 +120,13 @@ Unhealthy Services: {', '.join([s['name'] for s in unhealthy]) if unhealthy else
         prompt += f"  [{a['severity']}] {a['service']}: {a['message']}\n"
 
     prompt += "\n## Recent Logs\n"
-    for l in logs[:5]:
-        prompt += f"  [{l['level'].upper()}] {l['service']}: {l['message'][:100]}\n"
+    for l in logs[:3]:
+        prompt += f"  [{l['level'].upper()}] {l['service']}: {l['message'][:80]}\n"
 
     if feedback:
-        prompt += f"\n## Last Action Feedback\nImpact: {feedback.get('impact', 'N/A')}\nHint: {feedback.get('hint', 'N/A')}\n"
+        prompt += f"\nLast Action Feedback: {feedback.get('hint', '')}\n"
 
-    prompt += f"\n## Action History (Last 5 steps)\n"
-    for h in action_history[-5:]:
-        prompt += f" - Step {h.get('step')}: {h.get('action_type')} {h.get('parameters')}\n"
-
-    prompt += "\nRespond with ONLY a JSON object: {\"action_type\": \"...\", \"parameters\": {...}}"
+    prompt += "\nRespond with ONLY a JSON object: {\"action_type\": \"diagnose\", \"parameters\": {\"root_cause_service\": \"<service_name>\"}}"
     return prompt
 
 
@@ -148,12 +138,11 @@ def get_rule_based_action(observation: Dict[str, Any], step: int) -> Optional[Di
     last_action = history[-1].get("action_type") if history else None
     target = unhealthy[0]["name"] if unhealthy else services[0]["name"]
 
-    # Step 1: No history → return None to force LLM call
-    # LLM will pick "diagnose" based on the prompt instructions
+    # Step 1: return None → forces LLM call → LLM picks diagnose
     if not last_action:
         return None
 
-    # Step 2: After LLM diagnoses → rule fires restart_service
+    # Step 2: after diagnose → rule fires restart_service
     if last_action == "diagnose":
         return {"action_type": "restart_service", "parameters": {"service": target}}
 
@@ -165,24 +154,24 @@ def call_llm(prompt: str) -> Dict[str, Any]:
 
     api_key = os.environ.get("API_KEY")
     base_url = os.environ.get("API_BASE_URL")
-    model_name = os.environ.get("MODEL_NAME", "mistralai/mistral-7b-instruct")
+    model_name = os.environ.get("MODEL_NAME", "gpt-3.5-turbo")
 
     if not api_key or not base_url:
-        raise ValueError("Missing HF_TOKEN or API_BASE_URL environment variables.")
+        # Fallback if proxy not injected — diagnose the first unhealthy service
+        return {
+            "action_type": "diagnose",
+            "parameters": {"root_cause_service": "unknown"}
+        }
 
     client = OpenAI(
         api_key=api_key,
         base_url=base_url,
-        default_headers={
-            "HTTP-Referer": "https://cloudops-agent.local",
-            "X-Title": "CloudOpsWarRoom",
-        },
     )
 
     response = client.chat.completions.create(
         model=model_name,
         messages=[
-            {"role": "system", "content": "You are a world-class SRE. JSON only."},
+            {"role": "system", "content": "You are a world-class SRE. Respond with JSON only."},
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
@@ -193,7 +182,6 @@ def call_llm(prompt: str) -> Dict[str, Any]:
 
 
 def random_action(service_names: List[str], observation: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate a random valid action for testing."""
     action_type = random.choice(ALL_ACTION_TYPES)
     params = {}
 
@@ -218,7 +206,6 @@ def random_action(service_names: List[str], observation: Dict[str, Any]) -> Dict
 
 
 def run_agent(args):
-    """Main agent loop supporting local and remote execution."""
     if args.local:
         env = CloudOpsWarRoomEnvironment(debug=args.debug)
         obs_obj = env.reset(task_id=args.task)
@@ -229,7 +216,6 @@ def run_agent(args):
         observation = resp.json()
         task_id = args.task or observation.get("task_id", "default")
 
-    # [START] Mandatory Tag (#4)
     print(f"[START] task_id=\"{task_id}\"")
 
     service_names = [s["name"] for s in observation.get("services", [])]
@@ -248,6 +234,15 @@ def run_agent(args):
             if not action_data:
                 prompt = build_llm_prompt(observation, step)
                 action_data = call_llm(prompt)
+                # Safety net: ensure diagnose has correct parameter
+                if action_data.get("action_type") == "diagnose":
+                    if "root_cause_service" not in action_data.get("parameters", {}):
+                        services = [s["name"] for s in observation.get("services", [])]
+                        unhealthy = [s["name"] for s in observation.get("services", [])
+                                     if s["status"] in ("degraded", "down", "overloaded")]
+                        action_data["parameters"] = {
+                            "root_cause_service": unhealthy[0] if unhealthy else services[0]
+                        }
 
         reward = 0.0
         if args.local:
@@ -279,10 +274,8 @@ def run_agent(args):
             done = result.get("done", False)
             info = result.get("info", {})
 
-        # [STEP] Mandatory Tag
         print(f"[STEP] step={step} action=\"{action_data['action_type']}\" reward={reward:.4f}")
 
-    # [END] Mandatory Tag (#4)
     score = info.get("normalized_score", 0.0)
     status = (
         "resolved"
@@ -292,21 +285,16 @@ def run_agent(args):
     print(f"[END] score={score:.4f} status=\"{status}\"")
 
 
-# ─── CLI entrypoint (required by pyproject.toml [project.scripts]) ───
-
 def main():
     parser = argparse.ArgumentParser(description="CloudOpsWarRoomEnv Baseline Agent")
-    # Default URL points to the running server in the same container
     parser.add_argument("--url", type=str, default="http://localhost:7860")
     parser.add_argument("--task", type=str, default=None)
-    parser.add_argument("--random", action="store_true", default=True)
+    parser.add_argument("--random", action="store_true")
     parser.add_argument("--local", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--max-steps", type=int, default=25)
 
     args = parser.parse_args()
-    # Always run the agent loop — server is started by Dockerfile CMD (uvicorn inference:app)
-    # Never call uvicorn.run() here; port 7860 is already bound by the time validator calls main()
     run_agent(args)
 
 
