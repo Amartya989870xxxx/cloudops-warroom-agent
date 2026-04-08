@@ -1,0 +1,64 @@
+spec_version: 1
+name: cloudops_warroom_env
+type: rl_environment
+runtime: docker
+app: cloudops_env.server.app:app
+port: 7860
+
+metadata:
+  title: "CloudOps War Room Environment"
+  description: >
+    A production-grade RL environment simulating real-world SRE/DevOps
+    incident response. The agent acts as an on-call engineer investigating,
+    diagnosing, and resolving production outages across a microservices
+    architecture.
+  author: "CloudOps Team"
+  version: "1.0.0"
+  tags:
+    - devops
+    - sre
+    - incident-response
+    - reinforcement-learning
+    - microservices
+
+tasks:
+  - id: noisy_alert
+    name: "Noisy Alert Triage"
+    difficulty: easy
+    description: "Single service failure with misleading alerts from healthy services"
+
+  - id: bad_deploy
+    name: "Bad Deploy Rollback"
+    difficulty: medium
+    description: "Recent deployment introduced a database query regression"
+
+  - id: cascade_failure
+    name: "Cascading Failure Investigation"
+    difficulty: hard
+    description: "Multi-service cascade from upstream infrastructure failure"
+
+  - id: cost_vs_performance
+    name: "Cost vs Performance Optimization"
+    difficulty: hard
+    description: "Buggy feature flag + overprovisioned infrastructure"
+
+  - id: fog_of_war
+    name: "Fog of War — Multi-Alert Chaos"
+    difficulty: expert
+    description: "Multiple alerts (real and fake) across 10 services"
+
+actions:
+  - query_logs
+  - check_metrics
+  - trace_request
+  - diagnose
+  - restart_service
+  - rollback_deploy
+  - scale_service
+  - toggle_feature_flag
+  - apply_rate_limit
+  - update_status_page
+  - reply_stakeholder
+  - page_oncall
+  - adjust_autoscaling
+  - right_size_service
