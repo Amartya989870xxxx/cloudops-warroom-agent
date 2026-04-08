@@ -148,9 +148,12 @@ def get_rule_based_action(observation: Dict[str, Any], step: int) -> Optional[Di
     last_action = history[-1].get("action_type") if history else None
     target = unhealthy[0]["name"] if unhealthy else services[0]["name"]
 
+    # Step 1: No history → return None to force LLM call
+    # LLM will pick "diagnose" based on the prompt instructions
     if not last_action:
-        return {"action_type": "diagnose", "parameters": {"root_cause_service": target}}
+        return None
 
+    # Step 2: After LLM diagnoses → rule fires restart_service
     if last_action == "diagnose":
         return {"action_type": "restart_service", "parameters": {"service": target}}
 
@@ -160,7 +163,7 @@ def get_rule_based_action(observation: Dict[str, Any], step: int) -> Optional[Di
 def call_llm(prompt: str) -> Dict[str, Any]:
     from openai import OpenAI
 
-    api_key = os.environ.get("HF_TOKEN")
+    api_key = os.environ.get("API_KEY")
     base_url = os.environ.get("API_BASE_URL")
     model_name = os.environ.get("MODEL_NAME", "mistralai/mistral-7b-instruct")
 
