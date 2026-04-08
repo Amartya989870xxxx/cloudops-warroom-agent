@@ -1,7 +1,9 @@
 """
-Baseline Agent for CloudOpsWarRoomEnv (v2 — Enhanced)
+CloudOps WarRoom — OpenEnv-compatible server + baseline agent (v2 — Enhanced)
 
 Strictly compliant with OpenEnv Pre-Submission Checklist:
+- Exposes top-level FastAPI `app` for uvicorn (`inference:app`)
+- Exposes `main()` for pyproject.toml [project.scripts] entrypoint
 - Uses API_BASE_URL, MODEL_NAME, HF_TOKEN environment variables.
 - Emits structured logs: [START], [STEP], [END].
 - Supports local/random execution without API keys.
@@ -19,6 +21,67 @@ import time
 from typing import Any, Dict, List, Optional
 
 import requests
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+from cloudops_env.env import CloudOpsWarRoomEnvironment
+from cloudops_env.models import Action
+
+# ─── FastAPI app (top-level — required by uvicorn `inference:app`) ───
+
+app = FastAPI(
+    title="CloudOps WarRoom Environment",
+    description="OpenEnv-compatible RL environment for autonomous SRE incident resolution",
+    version="0.1.0",
+)
+
+# Singleton env instance used by API routes
+_env: Optional[CloudOpsWarRoomEnvironment] = None
+
+
+def _get_env() -> CloudOpsWarRoomEnvironment:
+    global _env
+    if _env is None:
+        _env = CloudOpsWarRoomEnvironment()
+    return _env
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.post("/reset")
+async def reset(body: dict = {}):
+    task_id = body.get("task_id") if body else None
+    env = _get_env()
+    obs = env.reset(task_id=task_id)
+    return obs.model_dump()
+
+
+@app.post("/step")
+async def step(body: dict):
+    env = _get_env()
+    action = Action(
+        action_type=body.get("action_type"),
+        parameters=body.get("parameters", {}),
+    )
+    result = env.step(action)
+    return {
+        "observation": result.observation.model_dump(),
+        "reward": result.reward,
+        "done": result.done,
+        "info": result.info,
+    }
+
+
+@app.get("/observation")
+async def observation():
+    env = _get_env()
+    obs = env.get_observation()
+    return obs.model_dump()
+
 
 # ─── Action definitions ───
 
@@ -41,9 +104,9 @@ def build_llm_prompt(observation: Dict[str, Any], step: int) -> str:
     deps = observation.get("dependencies", [])
     action_history = observation.get("action_history", [])
     feedback = observation.get("last_action_feedback")
-    
+
     unhealthy = [s for s in services if s["status"] in ("degraded", "down", "overloaded")]
-    
+
     prompt = f"""You are a Senior SRE responding to an active incident (Step {step}).
 Your goal is to resolve the incident with MAXIMUM efficiency (minimal steps) and full communication.
 
@@ -77,7 +140,6 @@ Unhealthy Services: {', '.join([s['name'] for s in unhealthy]) if unhealthy else
     return prompt
 
 
-# Updated get_rule_based_action in inference.py
 def get_rule_based_action(observation: Dict[str, Any], step: int) -> Optional[Dict[str, Any]]:
     services = observation.get("services", [])
     unhealthy = [s for s in services if s["status"] in ("degraded", "down", "overloaded")]
@@ -97,7 +159,6 @@ def get_rule_based_action(observation: Dict[str, Any], step: int) -> Optional[Di
 
 def call_llm(prompt: str) -> Dict[str, Any]:
     from openai import OpenAI
-    import os
 
     api_key = os.environ.get("HF_TOKEN")
     base_url = os.environ.get("API_BASE_URL")
@@ -111,8 +172,8 @@ def call_llm(prompt: str) -> Dict[str, Any]:
         base_url=base_url,
         default_headers={
             "HTTP-Referer": "https://cloudops-agent.local",
-            "X-Title": "CloudOpsWarRoom"
-        }
+            "X-Title": "CloudOpsWarRoom",
+        },
     )
 
     response = client.chat.completions.create(
@@ -132,9 +193,11 @@ def random_action(service_names: List[str], observation: Dict[str, Any]) -> Dict
     """Generate a random valid action for testing."""
     action_type = random.choice(ALL_ACTION_TYPES)
     params = {}
-    
-    if action_type in ("query_logs", "check_metrics", "trace_request", "restart_service", 
-                        "apply_rate_limit", "page_oncall", "adjust_autoscaling", "right_size_service"):
+
+    if action_type in (
+        "query_logs", "check_metrics", "trace_request", "restart_service",
+        "apply_rate_limit", "page_oncall", "adjust_autoscaling", "right_size_service",
+    ):
         params = {"service": random.choice(service_names)}
     elif action_type == "diagnose":
         params = {"root_cause_service": random.choice(service_names)}
@@ -145,7 +208,7 @@ def random_action(service_names: List[str], observation: Dict[str, Any]) -> Dict
         params = {"service": random.choice(service_names), "direction": random.choice(["up", "down"])}
     elif action_type == "toggle_feature_flag":
         params = {"flag_name": "new_product_page_v2"}
-    elif action_type == "update_status_page" or action_type == "reply_stakeholder":
+    elif action_type in ("update_status_page", "reply_stakeholder"):
         params = {"message": "Investigating incident."}
 
     return {"action_type": action_type, "parameters": params}
@@ -153,10 +216,7 @@ def random_action(service_names: List[str], observation: Dict[str, Any]) -> Dict
 
 def run_agent(args):
     """Main agent loop supporting local and remote execution."""
-    # Import locally to avoid dependency issues if only running remote
     if args.local:
-        from cloudops_env.env import CloudOpsWarRoomEnvironment
-        from cloudops_env.models import Action
         env = CloudOpsWarRoomEnvironment(debug=args.debug)
         obs_obj = env.reset(task_id=args.task)
         observation = obs_obj.model_dump()
@@ -188,7 +248,10 @@ def run_agent(args):
 
         reward = 0.0
         if args.local:
-            action = Action(action_type=action_data["action_type"], parameters=action_data.get("parameters", {}))
+            action = Action(
+                action_type=action_data["action_type"],
+                parameters=action_data.get("parameters", {}),
+            )
             result = env.step(action)
             observation = result.observation.model_dump()
             reward = result.reward
@@ -216,13 +279,17 @@ def run_agent(args):
         # [STEP] Mandatory Tag
         print(f"[STEP] step={step} action=\"{action_data['action_type']}\" reward={reward:.4f}")
 
-        # Exit logic handled by while condition
     # [END] Mandatory Tag (#4)
     score = info.get("normalized_score", 0.0)
-    status = "resolved" if (
-        info.get("incident_resolved") and info.get("diagnosed_correctly")
-    ) else "failed"
+    status = (
+        "resolved"
+        if (info.get("incident_resolved") and info.get("diagnosed_correctly"))
+        else "failed"
+    )
     print(f"[END] score={score:.4f} status=\"{status}\"")
+
+
+# ─── CLI entrypoint (required by pyproject.toml [project.scripts]) ───
 
 def main():
     parser = argparse.ArgumentParser(description="CloudOpsWarRoomEnv Baseline Agent")
@@ -232,9 +299,14 @@ def main():
     parser.add_argument("--local", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--max-steps", type=int, default=25)
-    
+
     args = parser.parse_args()
-    run_agent(args)
+
+    # If called with no agent flags, start the server instead
+    if not (args.local or args.random or args.url != "http://localhost:8000"):
+        uvicorn.run(app, host="0.0.0.0", port=7860)
+    else:
+        run_agent(args)
 
 
 if __name__ == "__main__":
