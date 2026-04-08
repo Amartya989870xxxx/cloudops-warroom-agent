@@ -293,20 +293,18 @@ def run_agent(args):
 
 def main():
     parser = argparse.ArgumentParser(description="CloudOpsWarRoomEnv Baseline Agent")
-    parser.add_argument("--url", type=str, default="http://localhost:8000")
+    # Default URL points to the running server in the same container
+    parser.add_argument("--url", type=str, default="http://localhost:7860")
     parser.add_argument("--task", type=str, default=None)
-    parser.add_argument("--random", action="store_true")
+    parser.add_argument("--random", action="store_true", default=True)
     parser.add_argument("--local", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--max-steps", type=int, default=25)
 
     args = parser.parse_args()
-
-    # If called with no agent flags, start the server instead
-    if not (args.local or args.random or args.url != "http://localhost:8000"):
-        uvicorn.run(app, host="0.0.0.0", port=7860)
-    else:
-        run_agent(args)
+    # Always run the agent loop — server is started by Dockerfile CMD (uvicorn inference:app)
+    # Never call uvicorn.run() here; port 7860 is already bound by the time validator calls main()
+    run_agent(args)
 
 
 if __name__ == "__main__":
