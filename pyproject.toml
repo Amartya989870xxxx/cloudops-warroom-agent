@@ -5,16 +5,19 @@ description = "Autonomous SRE agent for CloudOps WarRoom"
 authors = [{ name = "Amartya Majumder" }]
 readme = "README.md"
 requires-python = ">=3.10"
-
 dependencies = [
     "requests",
     "fastapi",
-    "uvicorn"
+    "uvicorn",
+    "openenv-core>=0.2.0"
 ]
 
-[tool.openenv]
-entrypoint = "inference.py"
+[project.scripts]
+server = "inference:app"
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.openenv]
+entrypoint = "inference.py"
