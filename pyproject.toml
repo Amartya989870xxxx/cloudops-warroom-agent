@@ -1,0 +1,10 @@
+[project]
+name = "cloudops-warroom-agent"
+version = "0.1.0"
+description = "Autonomous SRE agent for CloudOps WarRoom"
+authors = [{ name = "Amartya Majumder" }]
+dependencies = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
