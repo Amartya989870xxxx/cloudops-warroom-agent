@@ -277,6 +277,7 @@ def run_task(url: str, task_id: str, max_steps: int = 25) -> float:
         print(f'[STEP] step={step} action="{action_data["action_type"]}" reward={reward:.4f}')
 
     score = info.get("normalized_score", 0.0)
+    score = max(0.001, min(0.999, score))
     status = (
         "resolved"
         if (info.get("incident_resolved") and info.get("diagnosed_correctly"))
