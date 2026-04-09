@@ -112,13 +112,13 @@ async def grader(body: dict = {}):
         incident_resolved = info.get("incident_resolved", False)
         diagnosed_correctly = info.get("diagnosed_correctly", False)
         if incident_resolved and diagnosed_correctly:
-            score = 1.0
+            score = 0.999
         elif diagnosed_correctly:
             score = 0.5
         elif incident_resolved:
             score = 0.3
         else:
-            score = 0.0
+            score = 0.001
         return {"normalized_score": score, "incident_resolved": incident_resolved, "diagnosed_correctly": diagnosed_correctly, "checks": {"diagnosed_correctly": diagnosed_correctly, "incident_resolved": incident_resolved}}
     except Exception:
         return {"normalized_score": 0.0, "incident_resolved": False, "diagnosed_correctly": False, "checks": {"diagnosed_correctly": False, "incident_resolved": False}}
