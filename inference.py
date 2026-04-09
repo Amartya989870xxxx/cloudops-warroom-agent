@@ -1,14 +1,12 @@
 """
-CloudOps WarRoom — OpenEnv-compatible server + baseline agent (v4 — Fully Compliant)
+CloudOps WarRoom — OpenEnv-compatible server + baseline agent (v5 — 3-Task Grader)
 
 Strictly compliant with OpenEnv Pre-Submission Checklist:
 - Exposes top-level FastAPI `app` for uvicorn (`inference:app`)
-- Exposes `main()` for pyproject.toml [project.scripts] entrypoint
-- Uses API_BASE_URL, MODEL_NAME, HF_TOKEN environment variables (per hackathon rules).
-- Emits structured logs: [START], [STEP], [END].
-- Supports local/random execution without API keys.
+- Exposes `main()` that runs all 3 tasks (easy/medium/hard) with graders
+- Uses API_BASE_URL, MODEL_NAME, HF_TOKEN environment variables.
+- Emits structured logs: [START], [STEP], [END] for each task.
 - NEVER crashes — all exceptions caught with safe fallbacks.
-- Optimal for vcpu=2, memory=8gb machines.
 """
 
 from __future__ import annotations
@@ -18,20 +16,18 @@ import json
 import os
 import random
 import sys
-import time
 import traceback
 from typing import Any, Dict, List, Optional
 
 import requests
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from openai import OpenAI  # Top-level import — required by hackathon rules
+from openai import OpenAI
 
 from cloudops_env.env import CloudOpsWarRoomEnvironment
 from cloudops_env.models import Action
 
-# ─── FastAPI app (top-level — required by uvicorn `inference:app`) ───
+# ─── FastAPI app ───
 
 app = FastAPI(
     title="CloudOps WarRoom Environment",
@@ -85,8 +81,6 @@ async def observation():
     return obs.model_dump()
 
 
-# ─── NEW ENDPOINTS ─── 
-
 @app.get("/tasks")
 async def list_tasks():
     return {
@@ -130,7 +124,6 @@ async def grader(body: dict = {}):
         return {"normalized_score": 0.0, "incident_resolved": False, "diagnosed_correctly": False, "checks": {"diagnosed_correctly": False, "incident_resolved": False}}
 
 
-
 # ─── Action definitions ───
 
 ALL_ACTION_TYPES = [
@@ -147,35 +140,28 @@ def build_llm_prompt(observation: Dict[str, Any], step: int) -> str:
     services = observation.get("services", [])
     alerts = observation.get("active_alerts", [])
     logs = observation.get("logs", [])
-    action_history = observation.get("action_history", [])
     feedback = observation.get("last_action_feedback")
-
     unhealthy = [s for s in services if s["status"] in ("degraded", "down", "overloaded")]
 
     prompt = f"""You are a Senior SRE responding to an active incident (Step {step}).
-Your goal is to resolve the incident efficiently.
 
 ## CRITICAL INSTRUCTIONS:
-1. You MUST call 'diagnose' with root_cause_service set to the unhealthy service name.
-2. Do NOT call check_metrics or query_logs first. Go straight to diagnose.
-3. Respond with ONLY a JSON object.
+1. Call 'diagnose' with root_cause_service set to the unhealthy service name.
+2. Respond with ONLY a JSON object.
 
-## System State
-Unhealthy Services: {', '.join([s['name'] for s in unhealthy]) if unhealthy else services[0]['name'] if services else 'unknown'}
+## Unhealthy Services
+{', '.join([s['name'] for s in unhealthy]) if unhealthy else services[0]['name'] if services else 'unknown'}
 
 ## Alerts
 """
     for a in alerts:
         prompt += f"  [{a['severity']}] {a['service']}: {a['message']}\n"
-
     prompt += "\n## Recent Logs\n"
     for l in logs[:3]:
         prompt += f"  [{l['level'].upper()}] {l['service']}: {l['message'][:80]}\n"
-
     if feedback:
-        prompt += f"\nLast Action Feedback: {feedback.get('hint', '')}\n"
-
-    prompt += "\nRespond with ONLY a JSON object: {\"action_type\": \"diagnose\", \"parameters\": {\"root_cause_service\": \"<service_name>\"}}"
+        prompt += f"\nHint: {feedback.get('hint', '')}\n"
+    prompt += '\nRespond with ONLY: {"action_type": "diagnose", "parameters": {"root_cause_service": "<service_name>"}}'
     return prompt
 
 
@@ -183,119 +169,54 @@ def get_rule_based_action(observation: Dict[str, Any], step: int) -> Optional[Di
     services = observation.get("services", [])
     unhealthy = [s for s in services if s["status"] in ("degraded", "down", "overloaded")]
     history = observation.get("action_history", [])
-
     last_action = history[-1].get("action_type") if history else None
     target = unhealthy[0]["name"] if unhealthy else (services[0]["name"] if services else "unknown")
 
-    # Step 1: return None → forces LLM call → LLM picks diagnose
     if not last_action:
-        return None
-
-    # Step 2: after diagnose → rule fires restart_service
+        return None  # triggers LLM → diagnose
     if last_action == "diagnose":
         return {"action_type": "restart_service", "parameters": {"service": target}}
-
     return None
 
 
 def _get_safe_fallback(observation: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a safe fallback diagnose action based on current observation."""
     services = observation.get("services", [])
     unhealthy = [s["name"] for s in services if s["status"] in ("degraded", "down", "overloaded")]
     target = unhealthy[0] if unhealthy else (services[0]["name"] if services else "unknown")
-    return {
-        "action_type": "diagnose",
-        "parameters": {"root_cause_service": target},
-    }
+    return {"action_type": "diagnose", "parameters": {"root_cause_service": target}}
 
 
 def call_llm(prompt: str, observation: Dict[str, Any] = None) -> Dict[str, Any]:
-    """
-    Call the LLM via OpenEnv proxy using OpenAI client.
-    - Uses HF_TOKEN as primary credential (per hackathon rules), API_KEY as fallback.
-    - Returns a safe fallback action if ANYTHING fails.
-    - NEVER raises an exception.
-    """
-    # ── Resolve credentials per hackathon spec ───────────────────────────────
-    api_key = (
-        os.environ.get("HF_TOKEN")    # Primary: hackathon-specified variable
-        or os.environ.get("API_KEY")  # Fallback: some OpenEnv runners inject this
-        or ""
-    )
+    api_key = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY") or ""
     base_url = os.environ.get("API_BASE_URL", "")
     model_name = os.environ.get("MODEL_NAME", "gpt-3.5-turbo")
-
     fallback = _get_safe_fallback(observation or {})
 
-    # If no credentials or base_url, return fallback immediately (no crash)
     if not api_key or not base_url:
         return fallback
-
-    # ── Attempt LLM call ─────────────────────────────────────────────────────
     try:
-        # OpenAI already imported at top-level; instantiate client here
-        client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        )
-
+        client = OpenAI(api_key=api_key, base_url=base_url)
         response = client.chat.completions.create(
             model=model_name,
             messages=[
-                {"role": "system", "content": "You are a world-class SRE. Respond with JSON only."},
+                {"role": "system", "content": "You are a world-class SRE. JSON only."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
             response_format={"type": "json_object"},
         )
-
-        raw = response.choices[0].message.content or ""
-        raw = raw.strip()
-
-        # Strip ```json fences if model wraps output despite response_format
+        raw = (response.choices[0].message.content or "").strip()
         if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1]
-            raw = raw.rsplit("```", 1)[0].strip()
-
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         parsed = json.loads(raw)
-
-        # Validate structure — must have action_type
         if not isinstance(parsed, dict) or "action_type" not in parsed:
             return fallback
-
         return parsed
-
     except Exception:
-        # Catch absolutely everything: connection errors, auth errors, parse errors
         return fallback
 
 
-def random_action(service_names: List[str], observation: Dict[str, Any]) -> Dict[str, Any]:
-    action_type = random.choice(ALL_ACTION_TYPES)
-    params = {}
-
-    if action_type in (
-        "query_logs", "check_metrics", "trace_request", "restart_service",
-        "apply_rate_limit", "page_oncall", "adjust_autoscaling", "right_size_service",
-    ):
-        params = {"service": random.choice(service_names) if service_names else "unknown"}
-    elif action_type == "diagnose":
-        params = {"root_cause_service": random.choice(service_names) if service_names else "unknown"}
-    elif action_type == "rollback_deploy":
-        deploys = [d["service"] for d in observation.get("recent_deploys", [])]
-        params = {"service": random.choice(deploys) if deploys else (random.choice(service_names) if service_names else "unknown")}
-    elif action_type == "scale_service":
-        params = {"service": random.choice(service_names) if service_names else "unknown", "direction": random.choice(["up", "down"])}
-    elif action_type == "toggle_feature_flag":
-        params = {"flag_name": "new_product_page_v2"}
-    elif action_type in ("update_status_page", "reply_stakeholder"):
-        params = {"message": "Investigating incident."}
-
-    return {"action_type": action_type, "parameters": params}
-
-
 def _ensure_diagnose_params(action_data: Dict[str, Any], observation: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensure a diagnose action always has root_cause_service filled in."""
     if action_data.get("action_type") == "diagnose":
         params = action_data.get("parameters") or {}
         if "root_cause_service" not in params or not params["root_cause_service"]:
@@ -306,95 +227,54 @@ def _ensure_diagnose_params(action_data: Dict[str, Any], observation: Dict[str, 
     return action_data
 
 
-def run_agent(args):
+# ─── Single task runner ───
+
+def run_task(url: str, task_id: str, max_steps: int = 25) -> float:
+    """Run one full episode and return normalized score."""
     try:
-        if args.local:
-            env = CloudOpsWarRoomEnvironment(debug=args.debug)
-            obs_obj = env.reset(task_id=args.task)
-            observation = obs_obj.model_dump()
-            task_id = args.task or "default"
-        else:
-            try:
-                resp = requests.post(f"{args.url}/reset", json={"task_id": args.task}, timeout=30)
-                observation = resp.json()
-                task_id = args.task or observation.get("task_id", "default")
-            except Exception as e:
-                print(f"[ERROR] Failed to reset environment: {e}")
-                print(f"[END] score=0.0000 status=\"failed\"")
-                return  # Graceful exit — no sys.exit(1)
-
-        print(f"[START] task_id=\"{task_id}\"")
-
-        service_names = [s["name"] for s in observation.get("services", [])]
-        step = 0
-        done = False
-        total_reward = 0.0
-        info = {}
-
-        while not done and step < args.max_steps:
-            step += 1
-
-            try:
-                if args.random:
-                    action_data = random_action(service_names, observation)
-                else:
-                    action_data = get_rule_based_action(observation, step)
-                    if not action_data:
-                        prompt = build_llm_prompt(observation, step)
-                        action_data = call_llm(prompt, observation)  # fully crash-safe
-
-                # Always ensure diagnose has correct params
-                action_data = _ensure_diagnose_params(action_data, observation)
-
-                # Final safety net: ensure action_data is valid
-                if not action_data or "action_type" not in action_data:
-                    action_data = _get_safe_fallback(observation)
-
-            except Exception:
-                # Even if all logic above somehow fails, never crash
-                action_data = _get_safe_fallback(observation)
-
-            reward = 0.0
-            try:
-                if args.local:
-                    action = Action(
-                        action_type=action_data["action_type"],
-                        parameters=action_data.get("parameters", {}),
-                    )
-                    result = env.step(action)
-                    observation = result.observation.model_dump()
-                    reward = result.reward
-                    done = result.done
-                    info = result.info
-                else:
-                    resp = requests.post(
-                        f"{args.url}/step",
-                        json=action_data,
-                        timeout=30,
-                    )
-                    result = resp.json()
-
-                    if "observation" not in result:
-                        print(f"[ERROR] Invalid response from environment: {result}")
-                        break
-
-                    observation = result["observation"]
-                    reward = result.get("reward", 0.0)
-                    done = result.get("done", False)
-                    info = result.get("info", {})
-
-            except Exception as e:
-                print(f"[ERROR] Step {step} failed: {e}")
-                break  # Stop gracefully, never crash
-
-            print(f"[STEP] step={step} action=\"{action_data['action_type']}\" reward={reward:.4f}")
-
+        resp = requests.post(f"{url}/reset", json={"task_id": task_id}, timeout=30)
+        observation = resp.json()
     except Exception as e:
-        # Absolute last resort — catch everything at the top level
-        print(f"[ERROR] Unhandled exception in run_agent: {e}")
-        traceback.print_exc()
-        print(f"[END] score=0.0000 status=\"failed\"")
-        return
+        print(f"[ERROR] Failed to reset for task {task_id}: {e}")
+        print(f'[END] score=0.0000 status="failed"')
+        return 0.0
+
+    print(f'[START] task_id="{task_id}"')
+
+    service_names = [s["name"] for s in observation.get("services", [])]
+    step = 0
+    done = False
+    info = {}
+    reward = 0.0
+
+    while not done and step < max_steps:
+        step += 1
+
+        try:
+            action_data = get_rule_based_action(observation, step)
+            if not action_data:
+                prompt = build_llm_prompt(observation, step)
+                action_data = call_llm(prompt, observation)
+            action_data = _ensure_diagnose_params(action_data, observation)
+            if not action_data or "action_type" not in action_data:
+                action_data = _get_safe_fallback(observation)
+        except Exception:
+            action_data = _get_safe_fallback(observation)
+
+        try:
+            resp = requests.post(f"{url}/step", json=action_data, timeout=30)
+            result = resp.json()
+            if "observation" not in result:
+                break
+            observation = result["observation"]
+            reward = result.get("reward", 0.0)
+            done = result.get("done", False)
+            info = result.get("info", {})
+        except Exception as e:
+            print(f"[ERROR] Step {step} failed: {e}")
+            break
+
+        print(f'[STEP] step={step} action="{action_data["action_type"]}" reward={reward:.4f}')
 
     score = info.get("normalized_score", 0.0)
     status = (
@@ -402,8 +282,11 @@ def run_agent(args):
         if (info.get("incident_resolved") and info.get("diagnosed_correctly"))
         else "failed"
     )
-    print(f"[END] score={score:.4f} status=\"{status}\"")
+    print(f'[END] score={score:.4f} status="{status}"')
+    return score
 
+
+# ─── CLI entrypoint ───
 
 def main():
     parser = argparse.ArgumentParser(description="CloudOpsWarRoomEnv Baseline Agent")
@@ -417,13 +300,31 @@ def main():
     args = parser.parse_args()
 
     try:
-        run_agent(args)
+        if args.task:
+            run_task(args.url, args.task, args.max_steps)
+        else:
+            # Run all 3 required tasks: easy / medium / hard
+            tasks = [
+                ("noisy_alert",     "easy"),
+                ("bad_deploy",      "medium"),
+                ("cascade_failure", "hard"),
+            ]
+            scores = {}
+            for task_id, difficulty in tasks:
+                print(f"\n{'='*50}")
+                print(f"Task: {task_id} ({difficulty})")
+                print(f"{'='*50}")
+                scores[task_id] = run_task(args.url, task_id, args.max_steps)
+
+            print("\n--- Final Evaluation Scores ---")
+            for task_id, score in scores.items():
+                print(f"  {task_id}: {score:.2f}")
+
     except SystemExit:
-        raise  # Let sys.exit() propagate normally
+        raise
     except Exception:
-        # Nuclear fallback — guarantees clean exit code
-        print(f"[END] score=0.0000 status=\"failed\"")
-        sys.exit(0)  # Exit 0 so OpenEnv does not see a crash
+        print('[END] score=0.0000 status="failed"')
+        sys.exit(0)
 
 
 if __name__ == "__main__":
